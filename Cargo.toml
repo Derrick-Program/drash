@@ -7,5 +7,12 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rustyline = { version = "18.0.0", features = ["rustyline-derive", "signal-hook"] }
+anyhow = "1.0.102"
+chrono = "0.4.44"
+colored = "3.1.1"
+dirs = "6.0.0"
+hostname = "0.4.2"
+nix = "0.31.2"
+rustyline = { version = "18.0.0", features = ["derive", "signal-hook"] }
 shlex = "1.3.0"
+signal-hook = "0.4.4"
