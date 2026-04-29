@@ -96,6 +96,27 @@ impl DrashHelper {
     }
 }
 
+use std::io::{self, Write};
+
+fn set_terminal_title(title: &str) {
+    print!("\x1b]0;{}\x07", title);
+    let _ = io::stdout().flush();
+}
+
+fn set_osc7_cwd() {
+    if let Ok(cwd) = env::current_dir() {
+        let hostname_os = hostname::get().unwrap_or_default();
+        let hostname = hostname_os.to_string_lossy();
+        print!("\x1b]7;file://{}/{}\x07", hostname, cwd.display());
+        let _ = io::stdout().flush();
+    }
+}
+
+fn vscode_integration_mark(code: &str) {
+    print!("\x1b]633;{}\x07", code);
+    let _ = std::io::stdout().flush();
+}
+
 fn get_git_branch() -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -156,6 +177,8 @@ fn get_history_path() -> PathBuf {
 }
 
 pub fn start_repl() -> rustyline::Result<()> {
+    set_terminal_title("drash");
+    set_osc7_cwd();
     let h = DrashHelper::new();
     let mut rl: Editor<DrashHelper, DefaultHistory> = Editor::new()?;
     rl.set_helper(Some(h));
@@ -164,6 +187,7 @@ pub fn start_repl() -> rustyline::Result<()> {
     let mut last_success = true;
     let mut exit_code = 0;
     loop {
+        vscode_integration_mark("A");
         let readline = rl.readline(&build_prompt(last_success, exit_code));
         match readline {
             Ok(line) => {
@@ -171,6 +195,7 @@ pub fn start_repl() -> rustyline::Result<()> {
                     if args.is_empty() {
                         continue;
                     }
+                    vscode_integration_mark("B");
                     let cmd = &args[0];
                     let params = &args[1..];
                     rl.add_history_entry(line.as_str()).unwrap();
@@ -187,6 +212,11 @@ pub fn start_repl() -> rustyline::Result<()> {
                             } else {
                                 last_success = true;
                                 exit_code = 0;
+                                set_terminal_title(&format!(
+                                    "drash: {}",
+                                    env::current_dir().unwrap().display()
+                                ));
+                                set_osc7_cwd();
                             }
                             continue;
                         }
@@ -229,6 +259,7 @@ pub fn start_repl() -> rustyline::Result<()> {
                             break;
                         }
                         _ => {
+                            set_terminal_title(&format!("drash [running: {}]", cmd));
                             let child = std::process::Command::new(cmd).args(params).spawn();
                             match child {
                                 Ok(mut handle) => {
@@ -242,14 +273,23 @@ pub fn start_repl() -> rustyline::Result<()> {
                                     last_success = false;
                                 }
                             }
+                            set_terminal_title(&format!(
+                                "drash: {}",
+                                env::current_dir().unwrap().display()
+                            ));
                         }
                     }
+                    vscode_integration_mark("C");
+                    vscode_integration_mark(&format!("D;{}", exit_code));
                 } else {
                     println!("語法錯誤：引號未閉合");
+                    vscode_integration_mark("C");
+                    vscode_integration_mark("D;1");
                 }
             }
             Err(ReadlineError::Interrupted) => {
                 println!("CTRL-C");
+                vscode_integration_mark("C");
                 break;
             }
             Err(ReadlineError::Eof) => {
