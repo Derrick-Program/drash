@@ -1,3 +1,5 @@
-fn main() {
-    println!("Hello, world!");
+mod repl;
+fn main() -> anyhow::Result<()> {
+    repl::start_repl()?;
+    Ok(())
 }
