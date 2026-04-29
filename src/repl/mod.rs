@@ -1,10 +1,100 @@
 use chrono::Local;
 use colored::*;
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
-use std::env;
-use std::path::PathBuf;
-use std::process::Command;
+use rustyline::{
+    completion::{Completer, FilenameCompleter, Pair},
+    error::ReadlineError,
+    highlight::MatchingBracketHighlighter,
+    hint::HistoryHinter,
+    history::DefaultHistory,
+    validate::MatchingBracketValidator,
+    Editor, Helper, Highlighter, Hinter, Validator,
+};
+use std::{
+    collections::BTreeSet, env, fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command,
+};
+
+#[derive(Helper, Hinter, Highlighter, Validator)]
+pub struct DrashHelper {
+    completer: FilenameCompleter,
+    #[rustyline(Highlighter)]
+    highlighter: MatchingBracketHighlighter,
+    #[rustyline(Validator)]
+    validator: MatchingBracketValidator,
+    #[rustyline(Hinter)]
+    hinter: HistoryHinter,
+    pub system_commands: BTreeSet<String>,
+}
+
+impl Completer for DrashHelper {
+    type Candidate = Pair;
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        let slice = &line[..pos];
+        if !slice.contains(' ') {
+            let mut candidates: Vec<Pair> = Vec::new();
+            let builtins = ["cd", "exit", "export", "history", "help"];
+            for cmd in builtins {
+                if cmd.starts_with(slice) {
+                    candidates.push(Pair {
+                        display: cmd.to_string(),
+                        replacement: cmd.to_string(),
+                    });
+                }
+            }
+
+            for cmd in self.system_commands.range(slice.to_string()..) {
+                if !cmd.starts_with(slice) {
+                    break;
+                }
+                candidates.push(Pair {
+                    display: cmd.clone(),
+                    replacement: cmd.clone(),
+                });
+            }
+
+            if !candidates.is_empty() {
+                return Ok((0, candidates));
+            }
+        }
+        self.completer.complete(line, pos, ctx)
+    }
+}
+
+impl DrashHelper {
+    pub fn new() -> Self {
+        let mut commands = BTreeSet::new();
+        if let Ok(path_var) = env::var("PATH") {
+            for dir in path_var.split(':') {
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            if let Ok(metadata) = path.metadata() {
+                                if metadata.permissions().mode() & 0o111 != 0 {
+                                    if let Some(name) = path.file_name() {
+                                        commands.insert(name.to_string_lossy().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            completer: FilenameCompleter::new(),
+            highlighter: MatchingBracketHighlighter::new(),
+            hinter: HistoryHinter::new(),
+            validator: MatchingBracketValidator::new(),
+            system_commands: commands,
+        }
+    }
+}
 
 fn get_git_branch() -> Option<String> {
     let output = Command::new("git")
@@ -66,7 +156,9 @@ fn get_history_path() -> PathBuf {
 }
 
 pub fn start_repl() -> rustyline::Result<()> {
-    let mut rl = DefaultEditor::new()?;
+    let h = DrashHelper::new();
+    let mut rl: Editor<DrashHelper, DefaultHistory> = Editor::new()?;
+    rl.set_helper(Some(h));
     let history_path = get_history_path();
     let _ = rl.load_history(&history_path);
     let mut last_success = true;
@@ -81,24 +173,75 @@ pub fn start_repl() -> rustyline::Result<()> {
                     }
                     let cmd = &args[0];
                     let params = &args[1..];
-                    if cmd == "exit" {
-                        println!("再見！");
-                        break;
-                    }
                     rl.add_history_entry(line.as_str()).unwrap();
-                    //TODO: 這裡可以加入內建指令的處理，例如 cd、export 等，這些指令不會啟動子程序，而是直接在 Shell 內部執行。
-                    let child = std::process::Command::new(cmd).args(params).spawn();
-
-                    match child {
-                        Ok(mut handle) => {
-                            let status = handle.wait().unwrap();
-                            exit_code = status.code().unwrap_or(-1);
-                            last_success = status.success();
+                    match cmd.as_str() {
+                        "cd" => {
+                            let target = params.first().map_or_else(
+                                || dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+                                PathBuf::from,
+                            );
+                            if let Err(e) = env::set_current_dir(&target) {
+                                eprintln!("cd: {}: {}", target.display(), e);
+                                last_success = false;
+                                exit_code = 1;
+                            } else {
+                                last_success = true;
+                                exit_code = 0;
+                            }
+                            continue;
                         }
-                        Err(_) => {
-                            eprintln!("drash: command not found: {}", args[0]);
-                            exit_code = 127;
-                            last_success = false;
+                        "export" => {
+                            last_success = true;
+                            exit_code = 0;
+                            for param in params {
+                                if let Some((key, value)) = param.split_once('=') {
+                                    env::set_var(key, value);
+                                } else {
+                                    eprintln!("export: invalid format: {}", param);
+                                    last_success = false;
+                                    exit_code = 1;
+                                    continue;
+                                }
+                            }
+                            continue;
+                        }
+                        "history" => {
+                            for (idx, entry) in rl.history().iter().enumerate() {
+                                println!("  {}  {}", idx + 1, entry);
+                            }
+                            last_success = true;
+                            exit_code = 0;
+                            continue;
+                        }
+                        "help" => {
+                            println!("內建指令:");
+                            println!("  cd [dir]       - 切換目錄");
+                            println!("  export VAR=VAL - 設定環境變數");
+                            println!("  history        - 顯示命令歷史");
+                            println!("  help           - 顯示此幫助訊息");
+                            println!("  exit           - 退出 Shell");
+                            last_success = true;
+                            exit_code = 0;
+                            continue;
+                        }
+                        "exit" => {
+                            println!("再見！");
+                            break;
+                        }
+                        _ => {
+                            let child = std::process::Command::new(cmd).args(params).spawn();
+                            match child {
+                                Ok(mut handle) => {
+                                    let status = handle.wait().unwrap();
+                                    exit_code = status.code().unwrap_or(-1);
+                                    last_success = status.success();
+                                }
+                                Err(_) => {
+                                    eprintln!("drash: command not found: {}", args[0]);
+                                    exit_code = 127;
+                                    last_success = false;
+                                }
+                            }
                         }
                     }
                 } else {
